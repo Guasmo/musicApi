@@ -37,7 +37,7 @@ socketio = SocketIO(app, cors_allowed_origins='*', ping_interval=100, ping_timeo
 # Variables de entorno para configuración
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID', 'c9d53d6622df48ffbec775e99d16af49')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET', '35108ddf5b694f118083b5a76fa705bc')
-BASE_URL = os.environ.get('BASE_URL', 'https://tu-app.railway.app')
+BASE_URL = os.environ.get('BASE_URL', 'https://web-production-7212c.up.railway.app')
 
 spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
     client_id=SPOTIFY_CLIENT_ID,
