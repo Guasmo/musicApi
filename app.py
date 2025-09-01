@@ -3,7 +3,6 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from urllib import parse
 import urllib.request
-from youtubesearchpython import VideosSearch, PlaylistsSearch, Playlist
 import yt_dlp
 import eyed3
 from eyed3.id3.frames import ImageFrame
@@ -14,6 +13,7 @@ import zipfile
 import random
 import re
 import traceback
+from urllib.parse import parse_qs, urlparse
 
 # Crear directorio static si no existe
 if not os.path.exists('static'):
@@ -37,6 +37,74 @@ socketio = SocketIO(app, cors_allowed_origins='*', ping_interval=100, ping_timeo
 # Variables de entorno para configuración
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:5000')
 
+def search_youtube_videos(query, max_results=10):
+    """
+    Buscar videos de YouTube usando yt-dlp
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'default_search': 'ytsearch' + str(max_results) + ':',
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Buscar videos
+            search_results = ydl.extract_info(query, download=False)
+            
+            if not search_results or 'entries' not in search_results:
+                return []
+            
+            results = []
+            for entry in search_results['entries']:
+                if entry:
+                    result = {
+                        'id': entry.get('id', ''),
+                        'title': entry.get('title', 'Unknown Title'),
+                        'channel': entry.get('uploader', 'Unknown Channel'),
+                        'duration': entry.get('duration_string', 'N/A'),
+                        'view_count': entry.get('view_count', 0),
+                        'thumbnail': f"https://i.ytimg.com/vi/{entry.get('id', '')}/hq720.jpg",
+                        'url': entry.get('url', f"https://www.youtube.com/watch?v={entry.get('id', '')}")
+                    }
+                    results.append(result)
+            
+            return results
+    except Exception as e:
+        print(f"Error en búsqueda: {e}")
+        traceback.print_exc()
+        return []
+
+def get_video_info(video_id):
+    """
+    Obtener información detallada de un video específico
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            url = f'https://www.youtube.com/watch?v={video_id}'
+            info = ydl.extract_info(url, download=False)
+            
+            return {
+                'id': info.get('id', video_id),
+                'title': info.get('title', 'Unknown Title'),
+                'uploader': info.get('uploader', 'Unknown Channel'),
+                'duration': info.get('duration', 0),
+                'duration_string': info.get('duration_string', 'N/A'),
+                'view_count': info.get('view_count', 0),
+                'description': info.get('description', '')[:200] + '...' if info.get('description') else '',
+                'thumbnail': info.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/hq720.jpg"),
+                'upload_date': info.get('upload_date', 'N/A')
+            }
+    except Exception as e:
+        print(f"Error obteniendo info del video: {e}")
+        return None
+
 def create_link_download_song(data):
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -45,7 +113,9 @@ def create_link_download_song(data):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': '%(id)s.%(ext)s'
+        'outtmpl': '%(id)s.%(ext)s',
+        'quiet': True,
+        'no_warnings': True,
     }
     
     try:
@@ -111,23 +181,27 @@ def song():
     print(f"nombreCancion: {nombreCancion}")
 
     try:
-        youtube_song = VideosSearch(nombreCancion, limit=1).result()
-        if not youtube_song['result']:
+        # Buscar usando yt-dlp
+        results = search_youtube_videos(nombreCancion, 1)
+        
+        if not results:
             return jsonify({"detail": "No se encontró la canción"}), 404
             
+        video = results[0]
+        
         data = {
-            "video_id": youtube_song['result'][0]['id'], 
+            "video_id": video['id'], 
             "format": "mp3",
             "metadata": {
-                "name": youtube_song['result'][0]['title'], 
-                "release_date": youtube_song['result'][0]['publishedTime'],
-                "artist": youtube_song['result'][0]['channel']['name'], 
+                "name": video['title'], 
+                "release_date": "YouTube",
+                "artist": video['channel'], 
                 "album": "YouTube",
                 "genre": "N/A", 
                 "number": 0,
-                "cover": f'https://i.ytimg.com/vi/{youtube_song["result"][0]["id"]}/hq720.jpg', 
-                "time": youtube_song['result'][0]['duration'],
-                "external_link": f"https://www.youtube.com/watch?v={youtube_song['result'][0]['id']}"
+                "cover": video['thumbnail'], 
+                "time": video['duration'],
+                "external_link": video['url']
             },
         }
 
@@ -160,34 +234,35 @@ def search_song():
         # Debug: Mostrar la consulta
         print(f"Buscando: {nombreCancion}")
         
-        youtube_songs = VideosSearch(nombreCancion, limit=limit).result()
-        print(f"Resultados encontrados: {len(youtube_songs.get('result', []))}")
+        # Usar yt-dlp para buscar
+        results = search_youtube_videos(nombreCancion, limit)
+        print(f"Resultados encontrados: {len(results)}")
         
         # Formato compatible con el frontend
         songs = []
-        for i, song in enumerate(youtube_songs.get('result', [])):
+        for i, video in enumerate(results):
             try:
                 # Crear estructura compatible con el frontend
                 song_data = {
-                    "nombre": song['title'],
-                    "artista": song['channel']['name'],
-                    "uri": song['title'],  # Usar el título como URI para búsqueda
-                    "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
-                    "external_link": f"https://www.youtube.com/watch?v={song['id']}",
-                    "video_id": song['id'],
+                    "nombre": video['title'],
+                    "artista": video['channel'],
+                    "uri": video['title'],  # Usar el título como URI para búsqueda
+                    "cover": video['thumbnail'],
+                    "external_link": video['url'],
+                    "video_id": video['id'],
                     "metadata": {
-                        "name": song['title'],
-                        "artist": song['channel']['name'],
+                        "name": video['title'],
+                        "artist": video['channel'],
                         "album": "YouTube",
-                        "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
-                        "duration": song.get('duration', 'N/A'),
-                        "views": song.get('viewCount', {}).get('text', 'N/A') if song.get('viewCount') else 'N/A',
-                        "external_link": f"https://www.youtube.com/watch?v={song['id']}"
+                        "cover": video['thumbnail'],
+                        "duration": video['duration'],
+                        "views": f"{video['view_count']:,}" if video['view_count'] else 'N/A',
+                        "external_link": video['url']
                     }
                 }
                 songs.append(song_data)
             except Exception as song_error:
-                print(f"Error procesando canción {i}: {song_error}")
+                print(f"Error procesando video {i}: {song_error}")
                 continue
 
         print(f"Canciones procesadas: {len(songs)}")
@@ -204,41 +279,43 @@ def playlist():
     if playlist_url is None:
         return jsonify({"detail": "Error: Se requiere el parámetro 'url'"}), 400
     
-    # Extraer ID de playlist de YouTube
-    playlist_id = None
-    if 'playlist?list=' in playlist_url:
-        playlist_id = playlist_url.split('list=')[1].split('&')[0]
-    elif 'youtube.com' in playlist_url and 'list=' in playlist_url:
-        playlist_id = playlist_url.split('list=')[1].split('&')[0]
-    else:
-        return jsonify({"detail": "URL de playlist de YouTube inválida"}), 400
-
     try:
-        # Obtener información de la playlist
-        playlist = Playlist(f'https://www.youtube.com/playlist?list={playlist_id}')
-        
-        playlist_data = {
-            "name": playlist.title,
-            "description": f"Playlist de YouTube con {len(playlist.videos)} canciones",
-            "total_songs": len(playlist.videos),
-            "cover": playlist.videos[0]['thumbnails'][0]['url'] if playlist.videos else None,
-            "songs": []
+        # Usar yt-dlp para obtener información de playlist
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,
         }
-
-        for i, video in enumerate(playlist.videos):
-            song_data = {
-                "position": i + 1,
-                "metadata": {
-                    "name": video['title'],
-                    "artist": video['channel']['name'],
-                    "album": playlist.title,
-                    "release": video.get('publishedTime', 'N/A'),
-                    "cover": video['thumbnails'][0]['url'] if video['thumbnails'] else f'https://i.ytimg.com/vi/{video["id"]}/hq720.jpg',
-                    "external_link": f"https://www.youtube.com/watch?v={video['id']}"
-                },
-                "video_id": video['id']
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            playlist_info = ydl.extract_info(playlist_url, download=False)
+            
+            if not playlist_info or 'entries' not in playlist_info:
+                return jsonify({"detail": "No se pudo obtener información de la playlist"}), 400
+        
+            playlist_data = {
+                "name": playlist_info.get('title', 'Playlist sin nombre'),
+                "description": f"Playlist con {len(playlist_info['entries'])} canciones",
+                "total_songs": len(playlist_info['entries']),
+                "cover": f"https://i.ytimg.com/vi/{playlist_info['entries'][0].get('id', '')}/hq720.jpg" if playlist_info['entries'] else None,
+                "songs": []
             }
-            playlist_data["songs"].append(song_data)
+
+            for i, video in enumerate(playlist_info['entries']):
+                if video:  # Algunos entries pueden ser None
+                    song_data = {
+                        "position": i + 1,
+                        "metadata": {
+                            "name": video.get('title', 'Título desconocido'),
+                            "artist": video.get('uploader', 'Artista desconocido'),
+                            "album": playlist_info.get('title', 'Playlist'),
+                            "release": "YouTube",
+                            "cover": f"https://i.ytimg.com/vi/{video.get('id', '')}/hq720.jpg",
+                            "external_link": video.get('url', f"https://www.youtube.com/watch?v={video.get('id', '')}")
+                        },
+                        "video_id": video.get('id', '')
+                    }
+                    playlist_data["songs"].append(song_data)
 
         return jsonify(playlist_data)
     except Exception as e:
