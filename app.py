@@ -13,6 +13,7 @@ import os
 import zipfile
 import random
 import re
+import traceback
 
 # Crear directorio static si no existe
 if not os.path.exists('static'):
@@ -81,6 +82,7 @@ def create_link_download_song(data):
         return data
     except Exception as e:
         print(f"Error en create_link_download_song: {e}")
+        traceback.print_exc()
         return None
 
 @app.route('/v1/file/<string:audio_file_name>')
@@ -136,7 +138,65 @@ def song():
         return jsonify(finaldata)
     except Exception as e:
         print(f"Error en /v1/song: {e}")
-        return jsonify({"detail": "Error interno del servidor"}), 500
+        traceback.print_exc()
+        return jsonify({"detail": f"Error interno del servidor: {str(e)}"}), 500
+
+@app.route('/v1/search/song')
+def search_song():
+    nombreCancion = request.args.get('name')
+    limit = request.args.get('limit', 10)
+    
+    if nombreCancion is None:
+        return jsonify({"detail": "Error: Se requiere el parámetro 'name'"}), 400
+
+    try:
+        limit = int(limit)
+        if limit > 50:
+            limit = 50
+    except ValueError:
+        limit = 10
+
+    try:
+        # Debug: Mostrar la consulta
+        print(f"Buscando: {nombreCancion}")
+        
+        youtube_songs = VideosSearch(nombreCancion, limit=limit).result()
+        print(f"Resultados encontrados: {len(youtube_songs.get('result', []))}")
+        
+        # Formato compatible con el frontend
+        songs = []
+        for i, song in enumerate(youtube_songs.get('result', [])):
+            try:
+                # Crear estructura compatible con el frontend
+                song_data = {
+                    "nombre": song['title'],
+                    "artista": song['channel']['name'],
+                    "uri": song['title'],  # Usar el título como URI para búsqueda
+                    "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
+                    "external_link": f"https://www.youtube.com/watch?v={song['id']}",
+                    "video_id": song['id'],
+                    "metadata": {
+                        "name": song['title'],
+                        "artist": song['channel']['name'],
+                        "album": "YouTube",
+                        "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
+                        "duration": song.get('duration', 'N/A'),
+                        "views": song.get('viewCount', {}).get('text', 'N/A') if song.get('viewCount') else 'N/A',
+                        "external_link": f"https://www.youtube.com/watch?v={song['id']}"
+                    }
+                }
+                songs.append(song_data)
+            except Exception as song_error:
+                print(f"Error procesando canción {i}: {song_error}")
+                continue
+
+        print(f"Canciones procesadas: {len(songs)}")
+        return jsonify(songs)
+        
+    except Exception as e:
+        print(f"Error en /v1/search/song: {e}")
+        traceback.print_exc()
+        return jsonify({"detail": f"Error interno del servidor: {str(e)}"}), 500
 
 @app.route('/v1/playlist')
 def playlist():
@@ -183,50 +243,8 @@ def playlist():
         return jsonify(playlist_data)
     except Exception as e:
         print(f"Error en /v1/playlist: {e}")
-        return jsonify({"detail": "Error al procesar la playlist"}), 500
-
-@app.route('/v1/search/song')
-def search_song():
-    nombreCancion = request.args.get('name')
-    limit = request.args.get('limit', 10)
-    
-    if nombreCancion is None:
-        return jsonify({"detail": "Error: Se requiere el parámetro 'name'"}), 400
-
-    try:
-        limit = int(limit)
-        if limit > 50:
-            limit = 50
-    except ValueError:
-        limit = 10
-
-    try:
-        youtube_songs = VideosSearch(nombreCancion, limit=limit).result()
-        
-        songs = []
-        for song in youtube_songs['result']:
-            song_data = {
-                "video_id": song['id'],
-                "metadata": {
-                    "name": song['title'],
-                    "artist": song['channel']['name'],
-                    "album": "YouTube",
-                    "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
-                    "duration": song['duration'],
-                    "views": song.get('viewCount', {}).get('text', 'N/A'),
-                    "external_link": f"https://www.youtube.com/watch?v={song['id']}"
-                }
-            }
-            songs.append(song_data)
-
-        return jsonify({
-            "query": nombreCancion,
-            "total_results": len(songs),
-            "songs": songs
-        })
-    except Exception as e:
-        print(f"Error en /v1/search/song: {e}")
-        return jsonify({"detail": "Error interno del servidor"}), 500
+        traceback.print_exc()
+        return jsonify({"detail": f"Error al procesar la playlist: {str(e)}"}), 500
 
 @app.route('/v1/checkfiles')
 def check_files():
@@ -265,7 +283,13 @@ def create_zip():
         return send_file(zip_name, mimetype='application/zip', as_attachment=True)
     except Exception as e:
         print(f"Error creando ZIP: {e}")
-        return jsonify({"error": "Error interno del servidor"}), 500
+        traceback.print_exc()
+        return jsonify({"error": f"Error interno del servidor: {str(e)}"}), 500
+
+# Endpoint para health check
+@app.route('/v1/health')
+def health_check():
+    return jsonify({"status": "ok", "message": "API funcionando correctamente"})
 
 @socketio.on('message')
 def handle_message(message):
@@ -316,6 +340,7 @@ def handle_message(message):
                     socketio.sleep(0.5)
                 except Exception as e:
                     print(f"Error procesando canción: {e}")
+                    traceback.print_exc()
                     pass
     
     time.sleep(1)
