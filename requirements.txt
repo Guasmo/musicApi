@@ -17,7 +17,7 @@ spotipy==2.23.0
 urllib3==2.0.4
 Werkzeug==2.3.7
 youtube-search-python==1.6.6
-yt-dlp==2023.7.6
+yt-dlp>=2023.11.16
 eyed3==0.9.7
 spotdl==4.2.4
 python-socketio==5.8.0
