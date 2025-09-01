@@ -14,6 +14,7 @@ import random
 import re
 import traceback
 from urllib.parse import parse_qs, urlparse
+import json
 
 # Crear directorio static si no existe
 if not os.path.exists('static'):
@@ -37,44 +38,166 @@ socketio = SocketIO(app, cors_allowed_origins='*', ping_interval=100, ping_timeo
 # Variables de entorno para configuración
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:5000')
 
+def search_youtube_fallback(query, max_results=10):
+    """
+    Función de fallback usando requests para buscar en YouTube
+    """
+    import requests
+    
+    try:
+        # URL de búsqueda de YouTube sin API key
+        search_url = "https://www.youtube.com/results"
+        params = {
+            'search_query': query
+        }
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(search_url, params=params, headers=headers)
+        
+        if response.status_code != 200:
+            return []
+        
+        # Buscar datos JSON en el HTML
+        content = response.text
+        
+        # Extraer el script que contiene los datos de búsqueda
+        start_marker = 'var ytInitialData = '
+        end_marker = ';</script>'
+        
+        start_index = content.find(start_marker)
+        if start_index == -1:
+            return []
+        
+        start_index += len(start_marker)
+        end_index = content.find(end_marker, start_index)
+        
+        if end_index == -1:
+            return []
+        
+        json_str = content[start_index:end_index]
+        data = json.loads(json_str)
+        
+        results = []
+        
+        # Navegar por la estructura JSON compleja de YouTube
+        try:
+            contents = data['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents']
+            
+            for section in contents:
+                if 'itemSectionRenderer' in section:
+                    items = section['itemSectionRenderer']['contents']
+                    
+                    for item in items:
+                        if 'videoRenderer' in item:
+                            video = item['videoRenderer']
+                            
+                            video_id = video.get('videoId', '')
+                            title = video.get('title', {}).get('runs', [{}])[0].get('text', 'Unknown Title')
+                            
+                            # Channel info
+                            channel_name = 'Unknown Channel'
+                            if 'ownerText' in video and 'runs' in video['ownerText']:
+                                channel_name = video['ownerText']['runs'][0].get('text', 'Unknown Channel')
+                            
+                            # Duration
+                            duration = 'N/A'
+                            if 'lengthText' in video:
+                                duration = video['lengthText'].get('simpleText', 'N/A')
+                            
+                            # View count
+                            view_count = 0
+                            if 'viewCountText' in video:
+                                view_text = video['viewCountText'].get('simpleText', '0 views')
+                                # Extraer número de vistas
+                                import re
+                                view_match = re.search(r'([\d,]+)', view_text.replace(',', ''))
+                                if view_match:
+                                    view_count = int(view_match.group(1))
+                            
+                            result = {
+                                'id': video_id,
+                                'title': title,
+                                'channel': channel_name,
+                                'duration': duration,
+                                'view_count': view_count,
+                                'thumbnail': f"https://i.ytimg.com/vi/{video_id}/hq720.jpg",
+                                'url': f"https://www.youtube.com/watch?v={video_id}"
+                            }
+                            
+                            results.append(result)
+                            
+                            if len(results) >= max_results:
+                                break
+                    
+                    if len(results) >= max_results:
+                        break
+        except Exception as parse_error:
+            print(f"Error parseando resultados de fallback: {parse_error}")
+            return []
+        
+        return results[:max_results]
+        
+    except Exception as e:
+        print(f"Error en búsqueda fallback: {e}")
+        return []
+
 def search_youtube_videos(query, max_results=10):
     """
-    Buscar videos de YouTube usando yt-dlp
+    Buscar videos de YouTube usando yt-dlp con fallback
     """
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': True,
-        'default_search': 'ytsearch' + str(max_results) + ':',
     }
     
     try:
+        # Usar el formato correcto de ytsearch
+        search_query = f"ytsearch{max_results}:{query}"
+        print(f"Query de búsqueda: {search_query}")
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # Buscar videos
-            search_results = ydl.extract_info(query, download=False)
+            search_results = ydl.extract_info(search_query, download=False)
             
             if not search_results or 'entries' not in search_results:
-                return []
+                print("No se encontraron resultados o no hay entries")
+                print("Intentando con método fallback...")
+                return search_youtube_fallback(query, max_results)
+            
+            print(f"Entries encontrados: {len(search_results['entries'])}")
             
             results = []
             for entry in search_results['entries']:
                 if entry:
+                    print(f"Procesando video: {entry.get('title', 'Sin título')}")
                     result = {
                         'id': entry.get('id', ''),
                         'title': entry.get('title', 'Unknown Title'),
-                        'channel': entry.get('uploader', 'Unknown Channel'),
-                        'duration': entry.get('duration_string', 'N/A'),
+                        'channel': entry.get('uploader', entry.get('channel', 'Unknown Channel')),
+                        'duration': entry.get('duration_string', entry.get('duration', 'N/A')),
                         'view_count': entry.get('view_count', 0),
                         'thumbnail': f"https://i.ytimg.com/vi/{entry.get('id', '')}/hq720.jpg",
                         'url': entry.get('url', f"https://www.youtube.com/watch?v={entry.get('id', '')}")
                     }
                     results.append(result)
             
+            print(f"Resultados procesados: {len(results)}")
+            
+            # Si no hay resultados, intentar fallback
+            if len(results) == 0:
+                print("No hay resultados, intentando fallback...")
+                return search_youtube_fallback(query, max_results)
+                
             return results
     except Exception as e:
         print(f"Error en búsqueda: {e}")
         traceback.print_exc()
-        return []
+        print("Intentando con método fallback...")
+        return search_youtube_fallback(query, max_results)
 
 def get_video_info(video_id):
     """
@@ -367,6 +490,24 @@ def create_zip():
 @app.route('/v1/health')
 def health_check():
     return jsonify({"status": "ok", "message": "API funcionando correctamente"})
+
+# Endpoint de debug para probar búsquedas
+@app.route('/v1/debug/search')
+def debug_search():
+    query = request.args.get('q', 'test')
+    try:
+        print(f"DEBUG: Probando búsqueda con '{query}'")
+        results = search_youtube_videos(query, 3)
+        return jsonify({
+            "query": query,
+            "results_count": len(results),
+            "results": results
+        })
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
 
 @socketio.on('message')
 def handle_message(message):
