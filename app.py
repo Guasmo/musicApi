@@ -1,11 +1,9 @@
 from flask import Flask, jsonify, request, send_file, after_this_request
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
 from urllib import parse
 import urllib.request
-from youtubesearchpython import VideosSearch
+from youtubesearchpython import VideosSearch, PlaylistsSearch, Playlist
 import yt_dlp
 import eyed3
 from eyed3.id3.frames import ImageFrame
@@ -14,6 +12,7 @@ import subprocess
 import os
 import zipfile
 import random
+import re
 
 # Crear directorio static si no existe
 if not os.path.exists('static'):
@@ -35,14 +34,7 @@ app.config['JSON_AS_ASCII'] = False
 socketio = SocketIO(app, cors_allowed_origins='*', ping_interval=100, ping_timeout=5000)
 
 # Variables de entorno para configuración
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID', 'c9d53d6622df48ffbec775e99d16af49')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET', '35108ddf5b694f118083b5a76fa705bc')
-BASE_URL = os.environ.get('BASE_URL', 'https://web-production-7212c.up.railway.app')
-
-spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET
-))
+BASE_URL = os.environ.get('BASE_URL', 'http://localhost:5000')
 
 def create_link_download_song(data):
     ydl_opts = {
@@ -108,54 +100,34 @@ def return_audio_file(audio_file_name):
     else:
         return jsonify({"error": "Archivo no encontrado"}), 404
 
-# Resto de endpoints permanecen igual, solo cambiar URLs hardcodeadas
 @app.route('/v1/song')
-def songg():
+def song():
     nombreCancion = request.args.get('name')
     if nombreCancion is None:
-        return jsonify({"detail": "Error"}), 400
+        return jsonify({"detail": "Error: Se requiere el parámetro 'name'"}), 400
     
     print(f"nombreCancion: {nombreCancion}")
 
     try:
-        if nombreCancion.startswith("spotify:track:"):
-            spotify_song = spotify.track(nombreCancion)
-            youtube_song = VideosSearch(spotify_song['name'] + " " + spotify_song['artists'][0]['name'], limit=1).result()
-            data = {
-                "video_id": youtube_song['result'][0]['id'], 
-                "format": "mp3",
-                "metadata": {
-                    "name": spotify_song['name'], 
-                    "release_date": spotify_song['album']['release_date'],
-                    "artist": spotify_song['artists'][0]['name'], 
-                    "album": spotify_song['album']['name'],
-                    "genre": "N/A", 
-                    "number": 0,
-                    "cover": spotify_song['album']['images'][0]['url'], 
-                    "time": spotify_song['duration_ms'],
-                    'external_link': spotify_song['external_urls']['spotify']
-                },
-            }
-        else:
-            youtube_song = VideosSearch(nombreCancion, limit=1).result()
-            if not youtube_song['result']:
-                return jsonify({"detail": "No se encontró la canción"}), 404
-                
-            data = {
-                "video_id": youtube_song['result'][0]['id'], 
-                "format": "mp3",
-                "metadata": {
-                    "name": youtube_song['result'][0]['title'], 
-                    "release_date": youtube_song['result'][0]['publishedTime'],
-                    "artist": youtube_song['result'][0]['channel']['name'], 
-                    "album": "N/A",
-                    "genre": "N/A", 
-                    "number": 0,
-                    "cover": f'https://i.ytimg.com/vi/{youtube_song["result"][0]["id"]}/hq720.jpg', 
-                    "time": youtube_song['result'][0]['duration'],
-                    "external_link": f"https://www.youtube.com/watch?v={youtube_song['result'][0]['id']}"
-                },
-            }
+        youtube_song = VideosSearch(nombreCancion, limit=1).result()
+        if not youtube_song['result']:
+            return jsonify({"detail": "No se encontró la canción"}), 404
+            
+        data = {
+            "video_id": youtube_song['result'][0]['id'], 
+            "format": "mp3",
+            "metadata": {
+                "name": youtube_song['result'][0]['title'], 
+                "release_date": youtube_song['result'][0]['publishedTime'],
+                "artist": youtube_song['result'][0]['channel']['name'], 
+                "album": "YouTube",
+                "genre": "N/A", 
+                "number": 0,
+                "cover": f'https://i.ytimg.com/vi/{youtube_song["result"][0]["id"]}/hq720.jpg', 
+                "time": youtube_song['result'][0]['duration'],
+                "external_link": f"https://www.youtube.com/watch?v={youtube_song['result'][0]['id']}"
+            },
+        }
 
         finaldata = create_link_download_song(data)
         if finaldata is None:
@@ -166,47 +138,186 @@ def songg():
         print(f"Error en /v1/song: {e}")
         return jsonify({"detail": "Error interno del servidor"}), 500
 
-# [Resto de endpoints permanecen igual - playlist, search/song, checkfiles, zip]
-# Solo actualizar las URLs hardcodeadas en handle_message
+@app.route('/v1/playlist')
+def playlist():
+    playlist_url = request.args.get('url')
+    if playlist_url is None:
+        return jsonify({"detail": "Error: Se requiere el parámetro 'url'"}), 400
+    
+    # Extraer ID de playlist de YouTube
+    playlist_id = None
+    if 'playlist?list=' in playlist_url:
+        playlist_id = playlist_url.split('list=')[1].split('&')[0]
+    elif 'youtube.com' in playlist_url and 'list=' in playlist_url:
+        playlist_id = playlist_url.split('list=')[1].split('&')[0]
+    else:
+        return jsonify({"detail": "URL de playlist de YouTube inválida"}), 400
+
+    try:
+        # Obtener información de la playlist
+        playlist = Playlist(f'https://www.youtube.com/playlist?list={playlist_id}')
+        
+        playlist_data = {
+            "name": playlist.title,
+            "description": f"Playlist de YouTube con {len(playlist.videos)} canciones",
+            "total_songs": len(playlist.videos),
+            "cover": playlist.videos[0]['thumbnails'][0]['url'] if playlist.videos else None,
+            "songs": []
+        }
+
+        for i, video in enumerate(playlist.videos):
+            song_data = {
+                "position": i + 1,
+                "metadata": {
+                    "name": video['title'],
+                    "artist": video['channel']['name'],
+                    "album": playlist.title,
+                    "release": video.get('publishedTime', 'N/A'),
+                    "cover": video['thumbnails'][0]['url'] if video['thumbnails'] else f'https://i.ytimg.com/vi/{video["id"]}/hq720.jpg',
+                    "external_link": f"https://www.youtube.com/watch?v={video['id']}"
+                },
+                "video_id": video['id']
+            }
+            playlist_data["songs"].append(song_data)
+
+        return jsonify(playlist_data)
+    except Exception as e:
+        print(f"Error en /v1/playlist: {e}")
+        return jsonify({"detail": "Error al procesar la playlist"}), 500
+
+@app.route('/v1/search/song')
+def search_song():
+    nombreCancion = request.args.get('name')
+    limit = request.args.get('limit', 10)
+    
+    if nombreCancion is None:
+        return jsonify({"detail": "Error: Se requiere el parámetro 'name'"}), 400
+
+    try:
+        limit = int(limit)
+        if limit > 50:
+            limit = 50
+    except ValueError:
+        limit = 10
+
+    try:
+        youtube_songs = VideosSearch(nombreCancion, limit=limit).result()
+        
+        songs = []
+        for song in youtube_songs['result']:
+            song_data = {
+                "video_id": song['id'],
+                "metadata": {
+                    "name": song['title'],
+                    "artist": song['channel']['name'],
+                    "album": "YouTube",
+                    "cover": f'https://i.ytimg.com/vi/{song["id"]}/hq720.jpg',
+                    "duration": song['duration'],
+                    "views": song.get('viewCount', {}).get('text', 'N/A'),
+                    "external_link": f"https://www.youtube.com/watch?v={song['id']}"
+                }
+            }
+            songs.append(song_data)
+
+        return jsonify({
+            "query": nombreCancion,
+            "total_results": len(songs),
+            "songs": songs
+        })
+    except Exception as e:
+        print(f"Error en /v1/search/song: {e}")
+        return jsonify({"detail": "Error interno del servidor"}), 500
+
+@app.route('/v1/checkfiles')
+def check_files():
+    files = [file for file in os.listdir(".") if file.endswith(".mp3")]
+    return jsonify({
+        "total_files": len(files),
+        "files": files
+    })
+
+@app.route('/v1/zip')
+def create_zip():
+    try:
+        files = [file for file in os.listdir(".") if file.endswith(".mp3")]
+        if not files:
+            return jsonify({"error": "No hay archivos MP3 para comprimir"}), 404
+
+        zip_name = f"songs_{random.randint(1000, 9999)}.zip"
+        
+        with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in files:
+                zipf.write(file)
+
+        @after_this_request
+        def remove_file(response):
+            try:
+                os.remove(zip_name)
+                for file in files:
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+            except Exception as error:
+                print(f"Error eliminando archivos: {error}")
+            return response
+
+        return send_file(zip_name, mimetype='application/zip', as_attachment=True)
+    except Exception as e:
+        print(f"Error creando ZIP: {e}")
+        return jsonify({"error": "Error interno del servidor"}), 500
 
 @socketio.on('message')
 def handle_message(message):
     songs_send = []
-    print(message['playlist'])
-    subprocess.Popen(['spotdl', message['playlist'], '-p', '{title}.{ext}'], 
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print(f"Procesando playlist: {message.get('playlist_url')}")
     
-    while len(message['songs']) != len(songs_send):
-        for song in message['songs']:
-            if song["metadata"]["name"] not in songs_send and os.path.isfile(f'{song["metadata"]["name"]}.mp3'):
+    # Usar yt-dlp para descargar playlist completa
+    playlist_url = message.get('playlist_url')
+    if playlist_url:
+        subprocess.Popen(['yt-dlp', '-x', '--audio-format', 'mp3', '--audio-quality', '0', 
+                         '--output', '%(title)s.%(ext)s', playlist_url], 
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    songs = message.get('songs', [])
+    while len(songs) != len(songs_send):
+        for song in songs:
+            song_name = song["metadata"]["name"]
+            # Limpiar nombre de archivo
+            clean_name = re.sub(r'[<>:"/\\|?*]', '', song_name)
+            possible_files = [f for f in os.listdir('.') if f.endswith('.mp3') and clean_name.lower() in f.lower()]
+            
+            if song_name not in songs_send and possible_files:
                 try:
-                    audiofile = eyed3.load(f'{song["metadata"]["name"]}.mp3')
-                    if audiofile.tag is not None and audiofile.tag.title == song["metadata"]["name"]:
-                        data = {
-                            "song": {"video_id": 0, "format": "mp3"},
-                            "metadata": {
-                                "name": song['metadata']['name'], 
-                                "release_date": song['metadata']['release'],
-                                "artist": song['metadata']['artist'], 
-                                "album": song['metadata']['album'],
-                                "genre": "N/A", 
-                                "number": 0,
-                                "cover": song['metadata']['cover'], 
-                                "time": 0
-                            },
-                            'position': song['position'],
-                            'link': f'{BASE_URL}/v1/file/{song["metadata"]["name"]}.mp3',
-                            'external_link': song['metadata']['external_link'],
-                            'tamaño': "{} mb".format(
-                                round(os.path.getsize(f'{song["metadata"]["name"]}.mp3') / (1024 * 1024), 2))
-                        }
+                    file_path = possible_files[0]
+                    audiofile = eyed3.load(file_path)
+                    
+                    data = {
+                        "song": {"video_id": song.get("video_id", 0), "format": "mp3"},
+                        "metadata": {
+                            "name": song['metadata']['name'], 
+                            "release_date": song['metadata'].get('release', 'N/A'),
+                            "artist": song['metadata']['artist'], 
+                            "album": song['metadata']['album'],
+                            "genre": "N/A", 
+                            "number": 0,
+                            "cover": song['metadata']['cover'], 
+                            "time": 0
+                        },
+                        'position': song.get('position', 0),
+                        'link': f'{BASE_URL}/v1/file/{file_path}',
+                        'external_link': song['metadata']['external_link'],
+                        'tamaño': "{} mb".format(
+                            round(os.path.getsize(file_path) / (1024 * 1024), 2))
+                    }
 
-                        emit('message_reply', data)
-                        songs_send.append(song["metadata"]["name"])
-                        socketio.sleep(0.5)
+                    emit('message_reply', data)
+                    songs_send.append(song_name)
+                    socketio.sleep(0.5)
                 except Exception as e:
                     print(f"Error procesando canción: {e}")
                     pass
+    
     time.sleep(1)
     emit('disconnect')
 
